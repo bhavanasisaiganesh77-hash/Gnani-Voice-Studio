@@ -230,3 +230,6 @@ def chat(messages, temperature=0.3, max_tokens=800):
         "The AI assistant could not get a response from its configured "
         "providers. Check the app logs and API configuration."
     )
+def is_configured():
+    """Return whether at least one LLM provider has an API key configured."""
+    return bool(_providers())
