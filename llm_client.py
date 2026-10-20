@@ -1,62 +1,62 @@
-"""Gemini-first, Groq-backup language model client."""
-
 import logging
 import os
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    import streamlit as st
+except ImportError:
+    st = None
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 
 logger = logging.getLogger(__name__)
 
-TIMEOUT_SECONDS = 45
-
+# Default OpenAI-compatible API endpoints
 GEMINI_DEFAULT_URL = (
     "https://generativelanguage.googleapis.com/v1beta/openai"
 )
-GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
 
 GROQ_DEFAULT_URL = "https://api.groq.com/openai/v1"
 GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
+TIMEOUT_SECONDS = 90
+
 
 class LlmError(Exception):
-    """Safe, user-facing AI provider error."""
-
-    def __init__(self, title: str, detail: str):
-        super().__init__(title)
-        self.title = title
-        self.detail = detail
+    """Raised when all configured language-model providers fail."""
 
 
-def _setting(name: str, default: str = "") -> str:
+def _setting(name, default=""):
     """Read a setting from environment variables or Streamlit Secrets."""
-
     value = os.getenv(name)
 
-    if value and value.strip():
+    if value:
         return value.strip()
 
-    try:
-        import streamlit as st
+    if st is not None:
+        try:
+            value = st.secrets.get(name, default)
+            if value:
+                return str(value).strip()
+        except Exception:
+            # Streamlit Secrets may not be configured in local development.
+            pass
 
-        value = st.secrets.get(name, default)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    except Exception:
-        # Streamlit Secrets may not be available during local development.
-        pass
-
-    return default.strip() if isinstance(default, str) else ""
+    return default
 
 
-def _providers() -> list:
-    """Return configured providers in fallback order."""
+def _providers():
+    """Return configured providers in priority order: Gemini, then Groq."""
+    configured = []
 
-    providers = []
-
-    # Primary: Gemini
     gemini_key = _setting("LLM_API_KEY")
     gemini_url = _setting(
         "LLM_BASE_URL", GEMINI_DEFAULT_URL
@@ -65,15 +65,14 @@ def _providers() -> list:
         "LLM_MODEL", GEMINI_DEFAULT_MODEL
     )
 
-    if gemini_key and gemini_url and gemini_model:
-        providers.append({
+    if gemini_key:
+        configured.append({
             "name": "Gemini",
             "key": gemini_key,
             "url": gemini_url,
             "model": gemini_model,
         })
 
-    # Backup: Groq
     groq_key = _setting("GROQ_API_KEY")
     groq_url = _setting(
         "GROQ_BASE_URL", GROQ_DEFAULT_URL
@@ -82,67 +81,28 @@ def _providers() -> list:
         "GROQ_MODEL", GROQ_DEFAULT_MODEL
     )
 
-    if groq_key and groq_url and groq_model:
-        providers.append({
+    if groq_key:
+        configured.append({
             "name": "Groq",
             "key": groq_key,
             "url": groq_url,
             "model": groq_model,
         })
 
-    return providers
+    return configured
 
 
-def missing_settings() -> list:
-    """Return missing configuration names without exposing secret values."""
-
-    if _providers():
-        return []
-
-    missing = []
-
-    if not _setting("LLM_API_KEY") and not _setting("GROQ_API_KEY"):
-        missing.append("LLM_API_KEY or GROQ_API_KEY")
-
-    return missing
-
-
-def is_configured() -> bool:
-    """Whether at least one provider has a configured API key."""
-
-    return bool(_providers())
-
-
-def model_name() -> str:
-    """Return the first configured provider's model name."""
-
-    providers = _providers()
-    return providers[0]["model"] if providers else ""
-
-
-def _request(
-    provider: dict,
-    messages: list,
-    temperature: float,
-    max_tokens: int,
-) -> str:
-    """Make one request to a configured OpenAI-compatible API."""
-
+def _request(provider, messages, temperature=0.3, max_tokens=800):
+    """Send a chat-completion request to one provider."""
     base_url = provider["url"].rstrip("/")
+    url = f"{base_url}/chat/completions"
 
-    # Prevent a duplicated endpoint path if the base URL already contains it.
-    if base_url.endswith("/chat/completions"):
-        url = base_url
-    else:
-        url = f"{base_url}/chat/completions"
-        logger.info("LLM request URL: %s", url)
-        logger.info("LLM model: %s", provider["model"])
-
+    # Safe diagnostics: never log API keys or authorization headers.
     logger.info(
-        "AI request: provider=%s, url=%s, model=%s",
+        "LLM request: provider=%s model=%s url=%s",
         provider["name"],
-        url,
         provider["model"],
+        url,
     )
 
     response = requests.post(
@@ -157,101 +117,116 @@ def _request(
             "temperature": temperature,
             "max_tokens": max_tokens,
         },
-        timeout=TIMEOUT_SECONDS,
+        timeout=(10, TIMEOUT_SECONDS),
     )
 
-    # Log the status only. Never log API keys or request headers.
-    if response.status_code >= 400:
-        logger.warning(
-            "%s request failed with HTTP %s",
+    if not response.ok:
+        # Log a short error message, but never log the API key.
+        logger.error(
+            "%s returned HTTP %s: %s",
             provider["name"],
             response.status_code,
+            response.text[:500],
         )
 
     response.raise_for_status()
 
     data = response.json()
-    answer = data["choices"][0]["message"]["content"]
+    choices = data.get("choices", [])
 
-    if not isinstance(answer, str) or not answer.strip():
-        raise ValueError("Empty or invalid model response")
+    if not choices:
+        raise LlmError(
+            f'{provider["name"]} returned no response choices.'
+        )
 
-    return answer.strip()
+    message = choices[0].get("message", {})
+    content = message.get("content", "")
+
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+
+    # Some compatible APIs return content as a list of text blocks.
+    if isinstance(content, list):
+        parts = [
+            item.get("text", "")
+            for item in content
+            if isinstance(item, dict)
+        ]
+        answer = "\n".join(part for part in parts if part.strip())
+        if answer.strip():
+            return answer.strip()
+
+    raise LlmError(
+        f'{provider["name"]} returned an empty response.'
+    )
 
 
-def chat(
-    messages: list,
-    temperature: float = 0.4,
-    max_tokens: int = 1024,
-) -> str:
-    """Try Gemini first, then Groq if the first provider fails."""
+def chat(messages, temperature=0.3, max_tokens=800):
+    """
+    Generate a response using Gemini first and Groq as fallback.
 
+    messages should be a list of dictionaries, for example:
+    [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello"}
+    ]
+    """
     providers = _providers()
 
     if not providers:
         raise LlmError(
-            "AI assistant is not configured",
-            "Please configure a Gemini or Groq API key and try again.",
+            "No LLM API keys configured. Add LLM_API_KEY for Gemini "
+            "or GROQ_API_KEY for Groq in your environment or Streamlit Secrets."
         )
+
+    errors = []
 
     for provider in providers:
         try:
-            answer = _request(
+            return _request(
                 provider,
                 messages,
-                temperature,
-                max_tokens,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
-
-            logger.info(
-                "AI response completed using %s",
+        except requests.exceptions.Timeout:
+            logger.warning(
+                "%s request timed out.",
                 provider["name"],
             )
-            return answer
-
-        except requests.HTTPError as exc:
+            errors.append(f'{provider["name"]}: request timed out')
+        except requests.exceptions.HTTPError as exc:
             status = (
                 exc.response.status_code
                 if exc.response is not None
-                else 0
+                else "unknown"
             )
             logger.warning(
-                "%s request failed with HTTP %s",
+                "%s request failed with HTTP %s.",
                 provider["name"],
                 status,
             )
-
-        except requests.Timeout:
-            logger.warning("%s request timed out", provider["name"])
-
-        except requests.ConnectionError:
-            logger.warning(
-                "%s connection failed",
-                provider["name"],
-            )
-
-        except requests.RequestException as exc:
+            errors.append(f'{provider["name"]}: HTTP {status}')
+        except requests.exceptions.RequestException as exc:
             logger.warning(
                 "%s request failed: %s",
                 provider["name"],
                 type(exc).__name__,
             )
-
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            errors.append(
+                f'{provider["name"]}: connection error'
+            )
+        except (ValueError, KeyError, LlmError) as exc:
             logger.warning(
-                "%s returned an invalid response: %s",
+                "%s response could not be processed: %s",
                 provider["name"],
                 type(exc).__name__,
             )
+            errors.append(f'{provider["name"]}: invalid response')
 
-        except Exception as exc:
-            logger.warning(
-                "%s failed unexpectedly: %s",
-                provider["name"],
-                type(exc).__name__,
-            )
+    logger.error("All configured LLM providers failed: %s", errors)
 
     raise LlmError(
-        "I'm having trouble responding right now",
-        "Please try again in a moment.",
+        "The AI assistant could not get a response from its configured "
+        "providers. Check the app logs and API configuration."
     )
