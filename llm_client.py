@@ -35,14 +35,18 @@ def _setting(name: str, default: str = "") -> str:
     except Exception:
         return default
 
-
 def _providers():
-    """Gemini first, Groq second. Keys are never logged."""
+    """Return configured AI providers, with Gemini first and Groq as backup."""
+
     providers = []
 
+    # Primary provider: Google Gemini
     gemini_key = _setting("LLM_API_KEY")
-    gemini_url = _setting("LLM_BASE_URL").rstrip("/")
-    gemini_model = _setting("LLM_MODEL")
+    gemini_url = _setting(
+        "LLM_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+    ).rstrip("/")
+    gemini_model = _setting("LLM_MODEL", "gemini-2.5-flash")
 
     if gemini_key and gemini_url and gemini_model:
         providers.append({
@@ -52,9 +56,16 @@ def _providers():
             "model": gemini_model,
         })
 
+    # Backup provider: Groq
     groq_key = _setting("GROQ_API_KEY")
-    groq_url = _setting("GROQ_BASE_URL", GROQ_DEFAULT_URL).rstrip("/")
-    groq_model = _setting("GROQ_MODEL", GROQ_DEFAULT_MODEL)
+    groq_url = _setting(
+        "GROQ_BASE_URL",
+        "https://api.groq.com/openai/v1",
+    ).rstrip("/")
+    groq_model = _setting(
+        "GROQ_MODEL",
+        "llama-3.3-70b-versatile",
+    )
 
     if groq_key and groq_url and groq_model:
         providers.append({
@@ -65,7 +76,6 @@ def _providers():
         })
 
     return providers
-
 
 def missing_settings() -> list:
     """Return missing settings only when no provider is ready."""
