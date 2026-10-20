@@ -1,19 +1,6 @@
-"""Language-model client for the AI Voice Agent.
+"""LLM client with Gemini primary and Groq automatic fallback."""
 
-Gnani's speech APIs do not include a chat model, so the agent uses a separate, independently
-configured provider through the widely supported "OpenAI-compatible" chat API:
-
-    POST {LLM_BASE_URL}/chat/completions
-    Authorization: Bearer {LLM_API_KEY}
-
-Settings (all read from .env, never hardcoded, never shown in the UI):
-    LLM_API_KEY   your provider key
-    LLM_BASE_URL  e.g. https://generativelanguage.googleapis.com/v1beta/openai   (Google Gemini)
-    LLM_MODEL     a model id from your provider's model list
-
-Any provider that offers this API works (Google Gemini, OpenRouter, Groq, OpenAI, a local Ollama server...).
-"""
-
+import logging
 import os
 
 import requests
@@ -21,7 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TIMEOUT_SECONDS = 60
+logger = logging.getLogger(__name__)
+TIMEOUT_SECONDS = 45
+
+GROQ_DEFAULT_URL = "https://api.groq.com/openai/v1"
+GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 
 class LlmError(Exception):
@@ -31,72 +22,142 @@ class LlmError(Exception):
         self.detail = detail
 
 
-def _settings():
-    return (
-        (os.getenv("LLM_API_KEY") or "").strip(),
-        (os.getenv("LLM_BASE_URL") or "").strip().rstrip("/"),
-        (os.getenv("LLM_MODEL") or "").strip(),
-    )
+def _setting(name: str, default: str = "") -> str:
+    """Read from environment/.env or Streamlit Cloud Secrets."""
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+
+    try:
+        import streamlit as st
+        value = str(st.secrets.get(name, default)).strip()
+        return value
+    except Exception:
+        return default
+
+
+def _providers():
+    """Gemini first, Groq second. Keys are never logged."""
+    providers = []
+
+    gemini_key = _setting("LLM_API_KEY")
+    gemini_url = _setting("LLM_BASE_URL").rstrip("/")
+    gemini_model = _setting("LLM_MODEL")
+
+    if gemini_key and gemini_url and gemini_model:
+        providers.append({
+            "name": "Gemini",
+            "key": gemini_key,
+            "url": gemini_url,
+            "model": gemini_model,
+        })
+
+    groq_key = _setting("GROQ_API_KEY")
+    groq_url = _setting("GROQ_BASE_URL", GROQ_DEFAULT_URL).rstrip("/")
+    groq_model = _setting("GROQ_MODEL", GROQ_DEFAULT_MODEL)
+
+    if groq_key and groq_url and groq_model:
+        providers.append({
+            "name": "Groq",
+            "key": groq_key,
+            "url": groq_url,
+            "model": groq_model,
+        })
+
+    return providers
 
 
 def missing_settings() -> list:
-    """Names of the .env variables that are not set yet (never their values)."""
-    key, base, model = _settings()
-    return [n for n, v in (("LLM_API_KEY", key), ("LLM_BASE_URL", base), ("LLM_MODEL", model)) if not v]
+    """Return missing settings only when no provider is ready."""
+    if _providers():
+        return []
+    return [
+        "Configure Gemini (LLM_API_KEY, LLM_BASE_URL, LLM_MODEL) "
+        "or Groq (GROQ_API_KEY)"
+    ]
 
 
 def is_configured() -> bool:
-    return not missing_settings()
+    return bool(_providers())
 
 
 def model_name() -> str:
-    return _settings()[2]
+    providers = _providers()
+    return providers[0]["model"] if providers else ""
 
 
-def chat(messages: list, temperature: float = 0.4, max_tokens: int = 1024) -> str:
-    """Send a conversation and return the assistant's reply text."""
-    missing = missing_settings()
-    if missing:
-        raise LlmError("AI model not configured", "Add " + ", ".join(missing) + " to your .env file, then restart the app.")
-    key, base, model = _settings()
-    if not base.startswith(("https://", "http://")):
-        raise LlmError("AI model not configured", "LLM_BASE_URL must start with https:// (or http:// for a local server).")
+def _request(provider, messages, temperature, max_tokens):
+    response = requests.post(
+        f'{provider["url"]}/chat/completions',
+        headers={
+            "Authorization": f'Bearer {provider["key"]}',
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": provider["model"],
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        },
+        timeout=TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
 
-    response = None
-    try:
-        response = requests.post(
-            f"{base}/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens},
-            timeout=TIMEOUT_SECONDS,
+    data = response.json()
+    answer = data["choices"][0]["message"]["content"]
+
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Empty or invalid model response")
+
+    return answer.strip()
+
+
+def chat(messages: list, temperature: float = 0.4,
+         max_tokens: int = 1024) -> str:
+    """Try Gemini first, then Groq. Keep technical errors out of user replies."""
+    providers = _providers()
+
+    if not providers:
+        raise LlmError(
+            "AI assistant temporarily unavailable",
+            "Please try again in a moment.",
         )
-        response.raise_for_status()
-        data = response.json()
-        text = (data["choices"][0]["message"]["content"] or "").strip()
-    except requests.Timeout:
-        raise LlmError("The AI model timed out", "It did not answer in time. Try again.")
-    except requests.ConnectionError:
-        raise LlmError("Could not reach the AI model", "Check your internet connection and LLM_BASE_URL.")
-    except requests.HTTPError:
-        status = response.status_code if response is not None else "unknown"
-        raise LlmError(*_http_message(status))
-    except (ValueError, KeyError, IndexError, TypeError):
-        raise LlmError("Unexpected answer from the AI model", "The reply was not in the expected format. Check LLM_BASE_URL and LLM_MODEL.")
-    except requests.RequestException:
-        raise LlmError("AI request failed", "The request could not be completed. Try again.")
 
-    if not text:
-        raise LlmError("The AI model returned an empty answer", "Try rephrasing your question, or try again.")
-    return text
+    for provider in providers:
+        try:
+            answer = _request(
+                provider, messages, temperature, max_tokens
+            )
+            logger.info("AI response completed using %s", provider["name"])
+            return answer
 
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            logger.warning(
+                "%s request failed with HTTP %s",
+                provider["name"], status,
+            )
 
-def _http_message(status):
-    if status in (401, 403):
-        return ("The AI provider rejected the key", f"The provider returned {status}. Check LLM_API_KEY in your .env file.")
-    if status == 404:
-        return ("AI model or address not found", "The provider returned 404. Check LLM_BASE_URL and that LLM_MODEL is a valid model id.")
-    if status == 400:
-        return ("The AI provider rejected the request", "The provider returned 400. Check that LLM_MODEL is correct for this provider.")
-    if status == 429:
-        return ("AI usage limit reached", "The provider returned 429: too many requests or the free quota is used up. Wait and try again.")
-    return ("The AI provider had a problem", f"The provider returned HTTP {status}. Try again shortly.")
+        except requests.RequestException as exc:
+            # Log only the error type, never request headers or credentials.
+            logger.warning(
+                "%s request failed: %s",
+                provider["name"], type(exc).__name__,
+            )
+
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            logger.warning(
+                "%s returned an invalid response: %s",
+                provider["name"], type(exc).__name__,
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "%s failed unexpectedly: %s",
+                provider["name"], type(exc).__name__,
+            )
+
+    raise LlmError(
+        "I'm having trouble responding right now",
+        "Please try again in a moment.",
+    )
