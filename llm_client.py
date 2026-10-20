@@ -95,7 +95,12 @@ def model_name() -> str:
     providers = _providers()
     return providers[0]["model"] if providers else ""
 
-
+logger.info(
+    "AI request: provider=%s, url=%s, model=%s",
+    provider["name"],
+    f'{provider["url"].rstrip("/")}/chat/completions',
+    provider["model"],
+)
 def _request(provider, messages, temperature, max_tokens):
     response = requests.post(
         f'{provider["url"]}/chat/completions',
