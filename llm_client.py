@@ -233,3 +233,14 @@ def chat(messages, temperature=0.3, max_tokens=800):
 def is_configured():
     """Return whether at least one LLM provider has an API key configured."""
     return bool(_providers())
+def missing_settings():
+    """Return configuration settings that are missing."""
+    missing = []
+
+    gemini_key = _setting("LLM_API_KEY")
+    groq_key = _setting("GROQ_API_KEY")
+
+    if not gemini_key and not groq_key:
+        missing.append("LLM_API_KEY or GROQ_API_KEY")
+
+    return missing
