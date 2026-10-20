@@ -135,6 +135,8 @@ def _request(
         url = base_url
     else:
         url = f"{base_url}/chat/completions"
+        logger.info("LLM request URL: %s", url)
+        logger.info("LLM model: %s", provider["model"])
 
     logger.info(
         "AI request: provider=%s, url=%s, model=%s",
