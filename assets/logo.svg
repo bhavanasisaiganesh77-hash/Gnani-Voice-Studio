@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="260" height="56" viewBox="0 0 260 56" role="img" aria-label="Gnani Voice Studio">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F37A2C"/><stop offset="1" stop-color="#BE4305"/></linearGradient></defs>
+  <rect x="2" y="6" width="44" height="44" rx="13" fill="url(#g)"/>
+  <g stroke="#fff" stroke-width="3" stroke-linecap="round" fill="none"><path d="M12 24v8M18 18v20M24 13v30M30 19v18M36 24v8"/></g>
+  <text x="58" y="25" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#0E1A3A">Gnani</text>
+  <text x="58" y="45" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#BE4305">Voice Studio</text>
+</svg>
